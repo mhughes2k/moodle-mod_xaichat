@@ -116,18 +116,13 @@ if ($data = $chatform->get_data()) {
     // returned
     if (empty($docs)) {
         $logger->info("No RAG content returned");
-//        $prompt = (object)[
-//            "role" => "system",
-//            "content" => "I wasn't able to find anything relevant about this module"
-//        ];
-//        $_SESSION[$aicontextkey]['messages'][] = $prompt;
         $prompt = (object)[
             "role" => "user",
             "content" => $data->userprompt
         ];
         $_SESSION[$aicontextkey]['messages'][] = $prompt;
     } else {
-        $context = [];
+        $contextdata = [];
         // Remember We've got a search_engine doc here!
         foreach ($docs as $doc) {
 
@@ -135,12 +130,17 @@ if ($data = $chatform->get_data()) {
             $strdoc .= "URL: {$doc->get_doc_url()}\n";
             $strdoc .= $doc->get('content');
 
-            $context[] = $strdoc;
+            $contextdata[] = $strdoc;
         }
+        $context = (object)[
+            "role" => "system",
+            "iscontext" => true,    // Flag this item as being a context item.
+            "content" => "Use the following context to answer following question:" . implode("\n",$contextdata),
+        ];
+        $_SESSION[$aicontextkey]['messages'][] = $context;
         $prompt = (object)[
             "role" => "system",
-            "content" => "Use the following context to answer following question:" . implode("\n",$context) .
-                "\nQuestion: $data->userprompt"
+            "content" => "$data->userprompt"
         ];
         $_SESSION[$aicontextkey]['messages'][] = $prompt;
     }
@@ -149,7 +149,12 @@ if ($data = $chatform->get_data()) {
     $progress->update(3, $totalsteps, 'Waiting for response');
     $logger->info("Waiting for response from {providername}", ["providername" => $aiprovider->get('name')]);
     $airesults = $aiclient->chat($_SESSION[$aicontextkey]['messages']);
-    $_SESSION[$aicontextkey]['messages'] = array_merge($_SESSION[$aicontextkey]['messages'],$airesults);
+
+    // Truncate the messages to
+    $_SESSION[$aicontextkey]['messages'] = array_merge(
+        $aiclient->truncate_messages($_SESSION[$aicontextkey]['messages']),
+        $airesults
+    );
     //$progress->update(4, $totalsteps, 'Finished talking to AI');
     $progress->update_full(100,'Finished talking to AI');
     $logger->info("Finished talking to {providername}", ["providername" => $aiprovider->get('name')]);
@@ -192,19 +197,11 @@ foreach ($_SESSION[$aicontextkey]['messages'] as $message) {
 $displaymessages = array_reverse($displaymessages);
 $tcontext = [
     "userpic" => new user_picture($USER),
-    "messages" => $displaymessages
+    "messages" => $displaymessages,
+    "rawmessages" => print_r($_SESSION[$aicontextkey]['messages'],1),
 ];
 $chatform->display();
 
 echo $OUTPUT->render_from_template("mod_xaichat/conversation", $tcontext);
-
-if (true) {
-    echo html_writer::tag("pre", print_r($_SESSION[$aicontextkey]['messages'],1));
-}
-
-
-
-//echo \html_writer::tag('pre', print_r($displaymessages,1));
-//echo \html_writer::tag('pre', print_r($_SESSION[$aicontextkey]['messages'],1));
 
 echo $OUTPUT->footer();

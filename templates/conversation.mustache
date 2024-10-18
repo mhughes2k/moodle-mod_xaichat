@@ -2,7 +2,13 @@
 {{#messages}}
     {{> mod_xaichat/message}}
 {{/messages}}
+{{^messages}}
+    <p>Please start your conversation above.</p>
+{{/messages}}
 <hr />
+<h3>Raw Responses</h3>
+<div style="width:100%; max-height:25%; overflow-y:scroll">
 {{#rawmessages}}
 {{{rawmessages}}}
 {{/rawmessages}}
+</div>
