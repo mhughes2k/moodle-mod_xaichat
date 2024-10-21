@@ -62,8 +62,12 @@ $logger = $aiprovider->get_logger();
 $aicontextkey = "mod_xaichat:context:{$cm->id}:{$USER->id}";
 if (!isset($_SESSION[$aicontextkey])) {
     $_SESSION[$aicontextkey] = [
-        'messages'=> $aiprovider->generate_system_prompts($cm, $USER)
+        'messages'=> $aiprovider->generate_system_prompts($cm, $USER),
+        'conversation' => [],
     ];
+}
+if (!isset($_SESSION[$aicontextkey]['conversation'])) {
+    $_SESSION[$aicontextkey]['conversation'] = [];
 }
 
 $event = \mod_xaichat\event\course_module_viewed::create(array(
@@ -77,11 +81,19 @@ $event->trigger();
 $PAGE->set_title(format_string($moduleinstance->name));
 $PAGE->set_heading(format_string($course->fullname));
 $PAGE->set_context($modulecontext);
+
+$userpic = $OUTPUT->render(new \user_picture($USER)). fullname($USER);
+$aipic = $aiprovider->get('name');
+
 echo $OUTPUT->header();
 //var_dump ($aiprovider->get_settings_for_user($cm, $USER));
 $chatform = new aichatform();
 if ($data = $chatform->get_data()) {
     if (isset($data->restartbutton)) {
+        $_SESSION[$aicontextkey] = [
+            'messages'=> $aiprovider->generate_system_prompts($cm, $USER),
+            'conversation' => [],
+        ];
         redirect(new \moodle_url('/mod/xaichat/view.php', array('id' => $cm->id)));
     }
     $stepnow = 0;
@@ -125,11 +137,9 @@ if ($data = $chatform->get_data()) {
         $contextdata = [];
         // Remember We've got a search_engine doc here!
         foreach ($docs as $doc) {
-
             $strdoc = "Title: {$doc->get('title')}\n";
             $strdoc .= "URL: {$doc->get_doc_url()}\n";
             $strdoc .= $doc->get('content');
-
             $contextdata[] = $strdoc;
         }
         $context = (object)[
@@ -139,18 +149,28 @@ if ($data = $chatform->get_data()) {
         ];
         $_SESSION[$aicontextkey]['messages'][] = $context;
         $prompt = (object)[
-            "role" => "system",
+            "role" => "user",
             "content" => "$data->userprompt"
         ];
         $_SESSION[$aicontextkey]['messages'][] = $prompt;
+        // Render the user's prompt and add it to the "conversation" for display.
+        $conversationmessage = clone $prompt;
+        $conversationmessage->role = $conversationmessage->role == "user" ? $userpic : \html_writer::tag("strong", $aipic);
+        $_SESSION[$aicontextkey]['conversation'][] = $conversationmessage;
     }
 
     // Pass the whole context over the AI to summarise.    
     $progress->update(3, $totalsteps, 'Waiting for response');
     $logger->info("Waiting for response from {providername}", ["providername" => $aiprovider->get('name')]);
     $airesults = $aiclient->chat($_SESSION[$aicontextkey]['messages']);
+    foreach ($airesults as $message) {
+        $_SESSION[$aicontextkey]['conversation'][] = [
+            "role" => $message->role == "user" ? $userpic : \html_writer::tag("strong", $aipic),
+            "content" => format_text($message->content, FORMAT_MARKDOWN)
+        ];
+    }
 
-    // Truncate the messages to
+    // Truncate the messages.
     $_SESSION[$aicontextkey]['messages'] = array_merge(
         $aiclient->truncate_messages($_SESSION[$aicontextkey]['messages']),
         $airesults
@@ -159,14 +179,7 @@ if ($data = $chatform->get_data()) {
     $progress->update_full(100,'Finished talking to AI');
     $logger->info("Finished talking to {providername}", ["providername" => $aiprovider->get('name')]);
 
-//    $logger->info("{response}", ['response' => print_r($airesults, 1)]);
 
-    // We stash the data in the session temporarily (should go into an activity-user store in database) but this
-    // is fast and dirty, and then we do a redirect so that we don't double up the request if the user hit's
-    // refresh.
-//    $next = new \moodle_url('/mod/xaichat/view.php', ['id' => $cm->id]);
-
-    //redirect($next);
 } else if ($chatform->is_cancelled()) {
     $_SESSION[$aicontextkey] = [
         'messages'=>[]
@@ -182,19 +195,8 @@ if ($data = $chatform->get_data()) {
     // Initialise;
     $chatform->set_data($toform);
 }
-$userpic = $OUTPUT->render(new \user_picture($USER)). fullname($USER);
-$aipic = $aiprovider->get('name');
 
-$displaymessages = [];
-foreach ($_SESSION[$aicontextkey]['messages'] as $message) {
-    if ($message->role != "system") {
-        $displaymessages[] = [
-            "role" => $message->role == "user" ? $userpic : \html_writer::tag("strong", $aipic),
-            "content" => format_text($message->content, FORMAT_MARKDOWN)
-        ];
-    }
-}
-$displaymessages = array_reverse($displaymessages);
+$displaymessages = array_reverse($_SESSION[$aicontextkey]['conversation']);
 $tcontext = [
     "userpic" => new user_picture($USER),
     "messages" => $displaymessages,
