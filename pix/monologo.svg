@@ -1,0 +1,12 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Person 1 -->
+    <circle cx="6" cy="8" r="2" fill="#000"/>
+    <rect x="5" y="10" width="2" height="6" fill="#000"/>
+
+    <!-- Person 2 -->
+    <circle cx="18" cy="8" r="2" fill="#000"/>
+    <rect x="17" y="10" width="2" height="6" fill="#000"/>
+
+    <!-- Dialogue -->
+    <path d="M8,8 C8,6 10,5 12,5 S16,6 16,8 14,11 12,11 8,10 8,8 Z" fill="#888"/>
+</svg>
