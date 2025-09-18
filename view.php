@@ -54,15 +54,10 @@ $modulecontext = context_module::instance($cm->id);
 
 //$aicontext = $_SESSION[$aicontextkey];
 
-if (!($aiprovider = api::get_provider($moduleinstance->aiproviderid))){
-    throw new moodle_exception("noaiproviderfound", 'xaichat');
-}
-$logger = $aiprovider->get_logger();
-
 $aicontextkey = "mod_xaichat:context:{$cm->id}:{$USER->id}";
 if (!isset($_SESSION[$aicontextkey])) {
     $_SESSION[$aicontextkey] = [
-        'messages'=> $aiprovider->generate_system_prompts($cm, $USER),
+        'messages'=> [], // Reset to no messages
         'conversation' => [],
     ];
 }
@@ -83,11 +78,16 @@ $PAGE->set_heading(format_string($course->fullname));
 $PAGE->set_context($modulecontext);
 
 $userpic = $OUTPUT->render(new \user_picture($USER)). fullname($USER);
-$aipic = $aiprovider->get('name');
+$aipic = "ai";
 
 echo $OUTPUT->header();
 //var_dump ($aiprovider->get_settings_for_user($cm, $USER));
 $chatform = new aichatform();
+// Get an AI Manager instance.
+$chatmanager = new \local_ai_manager\manager('chat');
+$embeddingmanager = new \local_ai_manager\manager('embedding');
+$ragmanager = new \local_ai_manager\manager('rag');
+
 if ($data = $chatform->get_data()) {
     if (isset($data->restartbutton)) {
         $_SESSION[$aicontextkey] = [
@@ -98,8 +98,7 @@ if ($data = $chatform->get_data()) {
     }
     $stepnow = 0;
     $totalsteps = 4;
-    $aiclient = new AIClient($aiprovider);
-
+    
     $progress = new \progress_bar();
     $progress->create();
     if (empty($_SESSION[$aicontextkey]['messages'])) {
@@ -107,84 +106,68 @@ if ($data = $chatform->get_data()) {
         // a bunch of system and context specific prompts to constrain behaviour.
         $totalsteps++;
         $progress->update(1, $totalsteps,'Processing System Prompts');
-        $logger->info("Processing System Prompts");
-        $_SESSION[$aicontextkey]['messages'] = $aiprovider->generate_system_prompts($cm, $USER);
+
+        $_SESSION[$aicontextkey]['messages'] = [];//$aiprovider->generate_system_prompts($cm, $USER);
     }
     $progress->update(1, $totalsteps,'Looking for relevant context');
-    $logger->info("Looking for relevant context");
+
     $search = \core_search\manager::instance(true, true);
 
     // Some of these values can't be "trusted" to the end user to supply, via something
     // like a form, nor can they be entirely left to the plugin developer.
-    $settings = $aiprovider->get_settings_for_user($cm, $USER);
+    $settings = [];//$aiprovider->get_settings_for_user($cm, $USER);
     $settings['userquery'] = $data->userprompt;
     // This limits the plugin's search scope.
-    $settings['courseids'] = [$course->id];
+    $settings['courseids'] = [$course->id]; 
 
-    $docs = $search->search((object)$settings);
+    $embeddingrequest = $embeddingmanager->perform_request($data->userprompt, 'local_xaichat', $modulecontext->id);
+    $embedding = $embeddingrequest->get_content();
 
-    // Perform "R" from RAG, finding documents from within the context that are similar to the user's prompt.
-    // Add the retrieved documents to the context for this chat by generating some system messages with the content
-    // returned
-    if (empty($docs)) {
-        $logger->info("No RAG content returned");
-        $prompt = (object)[
-            "role" => "user",
-            "content" => $data->userprompt
-        ];
-        $_SESSION[$aicontextkey]['messages'][] = $prompt;
-    } else {
-        $contextdata = [];
-        // Remember We've got a search_engine doc here!
-        foreach ($docs as $doc) {
-            $strdoc = "Title: {$doc->get('title')}\n";
-            $strdoc .= "URL: {$doc->get_doc_url()}\n";
-            $strdoc .= $doc->get('content');
-            $contextdata[] = $strdoc;
-        }
-        $context = (object)[
-            "role" => "system",
-            "iscontext" => true,    // Flag this item as being a context item.
-            "content" => "Use the following context to answer following question:" . implode("\n",$contextdata),
-        ];
-        $_SESSION[$aicontextkey]['messages'][] = $context;
-        $prompt = (object)[
-            "role" => "user",
-            "content" => "$data->userprompt"
-        ];
-        $_SESSION[$aicontextkey]['messages'][] = $prompt;
-        // Render the user's prompt and add it to the "conversation" for display.
-        $conversationmessage = clone $prompt;
-        $conversationmessage->role = $conversationmessage->role == "user" ? $userpic : \html_writer::tag("strong", $aipic);
-        $_SESSION[$aicontextkey]['conversation'][] = $conversationmessage;
+    $ragrequest = $ragmanager->perform_request($embedding, 'local_xaichat', $modulecontext->id);
+    $docs = $ragrequest->get_content();
+
+    $prompt = $data->userprompt;
+    if (!empty($docs)) {
+        debugging("Got RAG content returned:" . $docs);
+        $prompt = "Use the following information\n\n{$docs} to answer: \n\n{$prompt}";
     }
+
+    $_SESSION[$aicontextkey]['messages'] = $prompt; // Store the "real" prompt.
+
+    // Render the user's prompt and add it to the "conversation" for display.
+    $conversationmessage = (object) [ 
+        'content' => $data->userprompt,
+        'role' => $userpic 
+    ];
+    $_SESSION[$aicontextkey]['conversation'][] = $conversationmessage;
 
     // Pass the whole context over the AI to summarise.    
     $progress->update(3, $totalsteps, 'Waiting for response');
-    $logger->info("Waiting for response from {providername}", ["providername" => $aiprovider->get('name')]);
-    $airesults = $aiclient->chat($_SESSION[$aicontextkey]['messages']);
-    foreach ($airesults as $message) {
-        $_SESSION[$aicontextkey]['conversation'][] = [
-            "role" => $message->role == "user" ? $userpic : \html_writer::tag("strong", $aipic),
-            "content" => format_text($message->content, FORMAT_MARKDOWN)
-        ];
-    }
-
-    // Truncate the messages.
-    $_SESSION[$aicontextkey]['messages'] = array_merge(
-        $aiclient->truncate_messages($_SESSION[$aicontextkey]['messages']),
-        $airesults
+    debugging("Waiting for response");
+    // $airesults = $aiclient->chat($_SESSION[$aicontextkey]['messages']);
+    $response = $chatmanager->perform_request(
+        $prompt,
+        'mod_xaichat',
+        $modulecontext->id
     );
+    
+    $result = $response->get_content();
+
+    $_SESSION[$aicontextkey]['conversation'][] = [
+        "role" => \html_writer::tag("strong", $aipic),
+        "content" => format_text($result, FORMAT_MARKDOWN)
+    ];
+
     //$progress->update(4, $totalsteps, 'Finished talking to AI');
     $progress->update_full(100,'Finished talking to AI');
-    $logger->info("Finished talking to {providername}", ["providername" => $aiprovider->get('name')]);
-
-
+    set_debugging(DEBUG_NONE, false);
+    // Instead of setting form data, redirect to clear the form input.
+    redirect(new \moodle_url('/mod/xaichat/view.php', array('id' => $cm->id)));
 } else if ($chatform->is_cancelled()) {
     $_SESSION[$aicontextkey] = [
         'messages'=>[]
     ];
-    $_SESSION[$aicontextkey]['messages'] = $aiprovider->generate_system_prompts($cm, $USER);
+    $_SESSION[$aicontextkey]['messages'] = [];//$aiprovider->generate_system_prompts($cm, $USER);
 } else {
     // Clear session on first view of form.
     $toform = [
@@ -196,7 +179,8 @@ if ($data = $chatform->get_data()) {
     $chatform->set_data($toform);
 }
 
-$displaymessages = array_reverse($_SESSION[$aicontextkey]['conversation']);
+
+$displaymessages = isset($_SESSION[$aicontextkey]['conversation']) ? array_reverse($_SESSION[$aicontextkey]['conversation']) : [];
 $tcontext = [
     "userpic" => new user_picture($USER),
     "messages" => $displaymessages,
@@ -206,4 +190,5 @@ $chatform->display();
 
 echo $OUTPUT->render_from_template("mod_xaichat/conversation", $tcontext);
 
+echo $OUTPUT->footer();
 echo $OUTPUT->footer();
