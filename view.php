@@ -121,9 +121,11 @@ if ($data = $chatform->get_data()) {
     $settings['courseids'] = [$course->id]; 
 
     $embeddingrequest = $embeddingmanager->perform_request($data->userprompt, 'local_xaichat', $modulecontext->id);
+    
     $embedding = $embeddingrequest->get_content();
 
     $ragrequest = $ragmanager->perform_request($embedding, 'local_xaichat', $modulecontext->id);
+
     $docs = $ragrequest->get_content();
 
     $prompt = $data->userprompt;
